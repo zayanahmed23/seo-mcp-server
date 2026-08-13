@@ -1,0 +1,16 @@
+# .gitignore
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# CRITICAL: Google OAuth Credentials
+client_secret*.json
+credentials.json
+token.json
+*.pickle
+
+# Environment variables
+.env
