@@ -4,12 +4,54 @@ Registers the Crawler, GSC, and GA4 wrappers as strongly-typed tools for LLM con
 """
 
 import json
+import logging
+import re
 from typing import List, Optional
 from mcp.server.fastmcp import FastMCP
 
 # Use the clean namespace imports defined in your __init__.py files
 from src.crawler import crawl_site
 from src.api import gsc_client, ga4_client
+
+# stdout is reserved for the MCP stdio transport; route logs to stderr so
+# they never corrupt protocol framing (this is FastMCP/logging's default,
+# made explicit here since we rely on it for error redaction below).
+logger = logging.getLogger(__name__)
+
+# Matches Windows drive-letter paths (C:\Users\name\...) and POSIX home
+# paths (/home/name/..., /Users/name/...) so they can be stripped out of
+# error text before it's handed back to the calling LLM/client. Exception
+# messages from libraries we call (e.g. FileNotFoundError) can otherwise
+# embed the local username or full directory layout. Quoted alternatives
+# are matched first since path segments (e.g. "SEO MCP server") may
+# contain spaces, which would otherwise truncate the bare-path match.
+_PATH_PATTERN = re.compile(
+    r"'[A-Za-z]:\\[^']*'"
+    r'|"[A-Za-z]:\\[^"]*"'
+    r"|[A-Za-z]:\\[^\s\"']+"
+    r"|'/(?:home|Users)/[^']*'"
+    r'|"/(?:home|Users)/[^"]*"'
+    r"|/(?:home|Users)/[^\s\"']+"
+)
+
+
+def _redact_path(match: re.Match) -> str:
+    text = match.group(0)
+    if text[0] in "'\"":
+        return f"{text[0]}<path>{text[0]}"
+    return "<path>"
+
+
+def _sanitize_error(exc: Exception, context: str) -> str:
+    """
+    Logs the full exception (with traceback) locally for debugging, and
+    returns a short, redacted message safe to send back through the MCP
+    tool response - which may be relayed to a third-party hosted LLM.
+    """
+    logger.exception(context)
+    message = _PATH_PATTERN.sub(_redact_path, str(exc))
+    return f"{context}: {type(exc).__name__}: {message}"
+
 
 # Initialize the FastMCP Server
 mcp = FastMCP("SEO_Systems_Architect")
@@ -33,7 +75,7 @@ async def audit_site_structure(start_url: str, path_prefix: str = "/") -> str:
         return result if isinstance(result, str) else json.dumps(result)
     except Exception as e:
         # Graceful degradation: Return the error to the LLM so it can attempt a self-correction
-        return json.dumps({"error": f"Crawler failed to execute: {str(e)}"})
+        return json.dumps({"error": _sanitize_error(e, "Crawler failed to execute")})
 
 
 @mcp.tool()
@@ -62,7 +104,7 @@ def get_gsc_performance(
         )
         return json.dumps(result, indent=2)
     except Exception as e:
-        return json.dumps({"error": f"GSC API query failed: {str(e)}"})
+        return json.dumps({"error": _sanitize_error(e, "GSC API query failed")})
 
 
 @mcp.tool()
@@ -90,4 +132,4 @@ def get_ga4_metrics(
         )
         return json.dumps(result, indent=2)
     except Exception as e:
-        return json.dumps({"error": f"GA4 API query failed: {str(e)}"})
+        return json.dumps({"error": _sanitize_error(e, "GA4 API query failed")})

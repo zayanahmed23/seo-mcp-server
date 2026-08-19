@@ -6,6 +6,7 @@ Handles multi-scope authorization and token lifecycle management.
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 from typing import List, Optional
 from google.auth.transport.requests import Request
@@ -31,8 +32,10 @@ class GoogleAuthManager:
         token_path: str = DEFAULT_TOKEN_FILE,
         scopes: Optional[List[str]] = None,
     ) -> None:
-        self.client_secrets_path = Path(client_secrets_path)
-        self.token_path = Path(token_path)
+        # Resolve to absolute paths at construction time so behavior does not
+        # silently change if the process's working directory shifts later.
+        self.client_secrets_path = Path(client_secrets_path).expanduser().resolve()
+        self.token_path = Path(token_path).expanduser().resolve()
         self.scopes = scopes or SCOPES
 
     def get_credentials(self) -> Credentials:
@@ -88,8 +91,30 @@ class GoogleAuthManager:
         return flow.run_local_server(port=0)
 
     def _save_token(self, creds: Credentials) -> None:
-        """Atomically caches credentials to token.json."""
-        with open(self.token_path, "w", encoding="utf-8") as token_file:
+        """
+        Caches credentials to token.json with owner-only permissions.
+
+        token.json holds a long-lived refresh token for the user's GSC/GA4
+        data, so it's created with 0600 (via the os.open mode, which the
+        umask can only narrow, never widen) instead of relying on default
+        permissions - which on shared/multi-user systems can leave it
+        group- or world-readable.
+        """
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        mode = stat.S_IRUSR | stat.S_IWUSR
+        fd = os.open(self.token_path, flags, mode)
+        try:
+            # os.open's mode only applies when creating a new file; chmod
+            # here too in case the file already existed with looser
+            # permissions from a previous run.
+            os.chmod(self.token_path, mode)
+            token_file = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            # fdopen hasn't taken ownership of fd yet, so we must close it.
+            os.close(fd)
+            raise
+
+        with token_file:
             token_file.write(creds.to_json())
 
 

@@ -41,3 +41,6 @@ token.json
 # Playwright artifacts
 test-results/
 playwright-report/
+
+# Crawler output (raw HTML dumps from audit_site_structure)
+crawl_output/
