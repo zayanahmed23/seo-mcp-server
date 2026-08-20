@@ -22,6 +22,13 @@ playwright install chromium
 `playwright install chromium` downloads the browser binary the crawler tool
 needs; it's a separate step from `pip install` and is easy to miss.
 
+> **Important:** run it with the *same* Python interpreter your MCP client
+> uses to launch this server. If your client is configured to run a specific
+> `python.exe` or venv, run `<that-python> -m playwright install chromium`.
+> Installing into a different environment is the most common cause of
+> `audit_site_structure` failing while the GSC and GA4 tools work fine —
+> the crawler is the only tool that needs a browser.
+
 ### 2. Create a Google OAuth client
 
 `get_gsc_performance` and `get_ga4_metrics` need read-only access to your
@@ -67,8 +74,11 @@ transport) in that client's MCP server configuration.
   request inside the browser (covering redirects and subresources). This
   matters because `start_url` may ultimately be influenced by content an
   LLM has read elsewhere.
-- Each crawl is capped at 20 pages and 3 link-hops deep, and only follows
-  links on the same origin under the given `path_prefix`.
+- Each crawl is capped at 20 pages, 3 link-hops deep, and a 45-second total
+  time budget, and only follows links on the same origin under the given
+  `path_prefix`. Hitting a limit returns partial results with
+  `stopped_early`/`truncated` set rather than failing the call — MCP clients
+  typically abort a tool call after ~60s.
 - Raw HTML fetched by the crawler is written to `crawl_output/` (gitignored)
   using a hash of the URL as the filename — crawled URLs never get used to
   construct filesystem paths directly.

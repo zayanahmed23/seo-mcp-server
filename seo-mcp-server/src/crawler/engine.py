@@ -18,10 +18,12 @@ also covers redirects and subresource requests like images/scripts).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import ipaddress
 import re
 import socket
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 from urllib.parse import urljoin, urlparse, urlunparse
@@ -37,9 +39,39 @@ NAV_TIMEOUT_MS = 15_000
 TEXT_PREVIEW_CHARS = 1500
 OUTPUT_DIR = Path("crawl_output")
 
+# Overall wall-clock budget for one crawl. MCP clients typically abort a tool
+# call after ~60s, and a 20-page crawl of a real site can exceed that - which
+# surfaces to the user as an opaque "tool error" with no partial results. We
+# stop early and return what we have, flagged via "stopped_early".
+CRAWL_BUDGET_SECONDS = 45.0
+
+# Playwright's default headless UA advertises "HeadlessChrome", which some
+# sites block outright. Present a normal desktop Chrome UA instead.
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+_MISSING_BROWSER_HINT = (
+    "Chromium is not installed for Playwright in this Python environment. "
+    "Run 'python -m playwright install chromium' using the SAME interpreter "
+    "that runs this MCP server (if your MCP client is configured with a "
+    "specific python.exe or venv, use that one)."
+)
+
 
 def _is_disallowed_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """True if this address points at a private/internal/reserved network."""
+    # Unwrap IPv4-mapped/6to4 forms first. Modern Python delegates these to
+    # the embedded IPv4 address, but older versions did not - so an attacker
+    # could smuggle 127.0.0.1 past the checks as '::ffff:127.0.0.1'.
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    sixtofour = getattr(ip, "sixtofour", None)
+    if sixtofour is not None:
+        ip = sixtofour
+
     return (
         ip.is_private
         or ip.is_loopback
@@ -88,14 +120,47 @@ def _check_url_is_safe(url: str) -> Tuple[bool, str]:
     return True, ""
 
 
-async def _route_guard(route: Route) -> None:
-    """Per-request defense-in-depth: re-validates every navigation and
-    subresource request the browser context makes, including redirects."""
-    safe, _reason = _check_url_is_safe(route.request.url)
-    if safe:
-        await route.continue_()
-    else:
-        await route.abort("blockedbyclient")
+async def _check_url_is_safe_async(url: str, cache: Dict[str, Tuple[bool, str]]) -> Tuple[bool, str]:
+    """
+    Async wrapper around _check_url_is_safe.
+
+    The route guard runs for every subresource (scripts, images, fonts,
+    beacons) - dozens to hundreds per page - and _check_url_is_safe does a
+    blocking socket.getaddrinfo. Called directly from the handler that
+    stalls the event loop on every request, so it's pushed to a worker
+    thread and memoized per host+scheme for the life of the crawl.
+    """
+    parsed = urlparse(url)
+    key = f"{parsed.scheme}://{parsed.hostname}"
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    result = await asyncio.to_thread(_check_url_is_safe, url)
+    cache[key] = result
+    return result
+
+
+def _make_route_guard(cache: Dict[str, Tuple[bool, str]]):
+    """Builds a per-request guard bound to this crawl's DNS cache."""
+
+    async def _route_guard(route: Route) -> None:
+        """Per-request defense-in-depth: re-validates every navigation and
+        subresource request the browser context makes, including redirects."""
+        try:
+            safe, _reason = await _check_url_is_safe_async(route.request.url, cache)
+            if safe:
+                await route.continue_()
+            else:
+                await route.abort("blockedbyclient")
+        except PlaywrightError:
+            # The page/context can close mid-flight (navigation, timeout,
+            # crawl budget exhausted). Routes belonging to a dead page raise
+            # here; swallowing keeps it from surfacing as an unhandled task
+            # exception that aborts the whole crawl.
+            pass
+
+    return _route_guard
 
 
 def _normalize(url: str) -> str:
@@ -169,7 +234,9 @@ async def crawl_site(start_url: str, path_prefix: str = "/") -> Dict[str, Any]:
     pages and MAX_DEPTH link hops. Writes raw HTML for each page to disk
     under ./crawl_output/ and returns a truncated JSON-friendly manifest.
     """
-    safe, reason = _check_url_is_safe(start_url)
+    dns_cache: Dict[str, Tuple[bool, str]] = {}
+
+    safe, reason = await _check_url_is_safe_async(start_url, dns_cache)
     if not safe:
         return {"error": reason, "start_url": start_url}
 
@@ -180,40 +247,65 @@ async def crawl_site(start_url: str, path_prefix: str = "/") -> Dict[str, Any]:
     queue: List[Tuple[str, int]] = [(_normalize(start_url), 0)]
     pages: List[Dict[str, Any]] = []
     blocked: List[Dict[str, str]] = []
+    deadline = time.monotonic() + CRAWL_BUDGET_SECONDS
+    stopped_early = False
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch()
         try:
-            context = await browser.new_context()
-            await context.route("**/*", _route_guard)
+            browser = await pw.chromium.launch()
+        except PlaywrightError as exc:
+            # Overwhelmingly the "audit tool errors but the GSC/GA4 tools
+            # work" case: Chromium was never downloaded into whichever
+            # environment the MCP client launches. Return one actionable
+            # line instead of Playwright's multi-line ASCII-art banner.
+            if "Executable doesn't exist" in str(exc):
+                return {"error": _MISSING_BROWSER_HINT, "start_url": start_url}
+            return {"error": f"Failed to launch Chromium: {exc}", "start_url": start_url}
+
+        try:
+            context = await browser.new_context(user_agent=USER_AGENT)
+            await context.route("**/*", _make_route_guard(dns_cache))
             page = await context.new_page()
 
             while queue and len(pages) < MAX_PAGES:
+                if time.monotonic() > deadline:
+                    stopped_early = True
+                    break
+
                 url, depth = queue.pop(0)
                 if url in visited:
                     continue
                 visited.add(url)
 
-                page_safe, page_reason = _check_url_is_safe(url)
+                page_safe, page_reason = await _check_url_is_safe_async(url, dns_cache)
                 if not page_safe:
                     blocked.append({"url": url, "reason": page_reason})
                     continue
 
                 try:
                     response = await page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+                    # page.content() raises if the page navigated again
+                    # (JS redirect, meta refresh) while we were reading it -
+                    # common on real sites, and previously uncaught, which
+                    # failed the entire crawl instead of just this page.
+                    html = await page.content()
                 except PlaywrightError as exc:
-                    pages.append({"url": url, "error": f"Navigation failed: {exc}"})
+                    pages.append({"url": url, "error": f"Failed to load page: {exc}"})
                     continue
 
-                html = await page.content()
                 status = response.status if response else None
-
                 metadata = _extract_metadata(url, status, html)
 
-                html_path = _safe_html_path(url)
-                html_path.parent.mkdir(parents=True, exist_ok=True)
-                html_path.write_text(html, encoding="utf-8")
-                metadata["raw_html_path"] = str(html_path)
+                try:
+                    html_path = _safe_html_path(url)
+                    html_path.parent.mkdir(parents=True, exist_ok=True)
+                    html_path.write_text(html, encoding="utf-8")
+                    metadata["raw_html_path"] = str(html_path)
+                except OSError as exc:
+                    # A read-only or full working directory shouldn't lose
+                    # the metadata we already extracted.
+                    metadata["raw_html_path"] = None
+                    metadata["html_write_error"] = str(exc)
 
                 pages.append(metadata)
 
@@ -230,6 +322,11 @@ async def crawl_site(start_url: str, path_prefix: str = "/") -> Dict[str, Any]:
         "pages_crawled": len(pages),
         "pages_remaining_in_queue": len(queue),
         "truncated": bool(queue),
+        "stopped_early": stopped_early,
+        "stopped_early_reason": (
+            f"Hit the {CRAWL_BUDGET_SECONDS:.0f}s crawl time budget; returning partial results."
+            if stopped_early else None
+        ),
         "max_pages_limit": MAX_PAGES,
         "max_depth_limit": MAX_DEPTH,
         "blocked_urls": blocked,
