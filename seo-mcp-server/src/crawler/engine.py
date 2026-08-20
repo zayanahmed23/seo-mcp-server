@@ -24,9 +24,12 @@ import ipaddress
 import re
 import socket
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.robotparser import RobotFileParser
 
 from bs4 import BeautifulSoup
 from playwright.async_api import Error as PlaywrightError
@@ -163,6 +166,40 @@ def _make_route_guard(cache: Dict[str, Tuple[bool, str]]):
     return _route_guard
 
 
+def _load_robots(start_url: str) -> Tuple[Optional[RobotFileParser], Optional[str]]:
+    """
+    Fetches and parses robots.txt for the start URL's origin.
+
+    An SEO auditor that ignores robots.txt is both a bad look and, once it's
+    pointed at third-party domains, a liability. A missing or unreachable
+    robots.txt means "no restrictions" per the standard, so we fail open -
+    but a fetch that succeeds is honoured.
+    """
+    parsed = urlparse(start_url)
+    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+    try:
+        req = urllib.request.Request(robots_url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status >= 400:
+                return None, f"robots.txt returned HTTP {resp.status}; proceeding unrestricted."
+            body = resp.read(512_000).decode("utf-8", errors="replace")
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return None, f"Could not fetch robots.txt ({exc}); proceeding unrestricted."
+
+    rp = RobotFileParser()
+    rp.parse(body.splitlines())
+    return rp, None
+
+
+def _robots_allows(rp: Optional[RobotFileParser], url: str) -> bool:
+    if rp is None:
+        return True
+    try:
+        return rp.can_fetch(USER_AGENT, url)
+    except Exception:
+        return True
+
+
 def _normalize(url: str) -> str:
     """Strips fragments so '#section' variants of the same page dedupe."""
     parsed = urlparse(url)
@@ -227,7 +264,11 @@ def _extract_links(base_url: str, html: str, origin: str, path_prefix: str) -> L
     return links
 
 
-async def crawl_site(start_url: str, path_prefix: str = "/") -> Dict[str, Any]:
+async def crawl_site(
+    start_url: str,
+    path_prefix: str = "/",
+    respect_robots: bool = True,
+) -> Dict[str, Any]:
     """
     Crawls a site breadth-first starting at `start_url`, following only
     same-origin links whose path starts with `path_prefix`, up to MAX_PAGES
@@ -249,6 +290,20 @@ async def crawl_site(start_url: str, path_prefix: str = "/") -> Dict[str, Any]:
     blocked: List[Dict[str, str]] = []
     deadline = time.monotonic() + CRAWL_BUDGET_SECONDS
     stopped_early = False
+
+    robots = None
+    robots_note = None
+    if respect_robots:
+        robots, robots_note = await asyncio.to_thread(_load_robots, start_url)
+        if not _robots_allows(robots, start_url):
+            return {
+                "error": (
+                    f"robots.txt at {urlparse(start_url).netloc} disallows crawling "
+                    f"{start_url} for this user agent. Pass respect_robots=false only "
+                    "if you own this site and intend to override it."
+                ),
+                "start_url": start_url,
+            }
 
     async with async_playwright() as pw:
         try:
@@ -280,6 +335,10 @@ async def crawl_site(start_url: str, path_prefix: str = "/") -> Dict[str, Any]:
                 page_safe, page_reason = await _check_url_is_safe_async(url, dns_cache)
                 if not page_safe:
                     blocked.append({"url": url, "reason": page_reason})
+                    continue
+
+                if not _robots_allows(robots, url):
+                    blocked.append({"url": url, "reason": "Disallowed by robots.txt"})
                     continue
 
                 try:
@@ -329,6 +388,8 @@ async def crawl_site(start_url: str, path_prefix: str = "/") -> Dict[str, Any]:
         ),
         "max_pages_limit": MAX_PAGES,
         "max_depth_limit": MAX_DEPTH,
+        "respected_robots": respect_robots,
+        "robots_note": robots_note,
         "blocked_urls": blocked,
         "pages": pages,
     }

@@ -12,6 +12,7 @@ from google.analytics.data_v1beta.types import (
     RunReportRequest,
 )
 from src.auth.google_oauth import get_google_credentials
+from src.dates import DateParseError, resolve_date_range
 
 class AnalyticsClient:
     """Manages interactions with the Google Analytics 4 (GA4) Data API."""
@@ -44,16 +45,25 @@ class AnalyticsClient:
         
         Args:
             property_id: The GA4 Property ID (e.g., '123456789').
-            start_date: Start date in YYYY-MM-DD format, or relative like '30daysAgo'.
-            end_date: End date in YYYY-MM-DD format, or 'today'.
+            start_date: YYYY-MM-DD, or a relative form like '30daysAgo',
+                'lastMonth', '2026-03'. See src.dates for the full vocabulary.
+            end_date: Same accepted formats as start_date.
             dimensions: List of dimensions to group by (defaults to ['sessionDefaultChannelGroup']).
             row_limit: Maximum number of rows to return to protect LLM context limits.
-            
+
         Returns:
             A clean dictionary containing the parsed rows or an error message.
         """
         if dimensions is None:
             dimensions = ["sessionDefaultChannelGroup"]
+
+        # GA4 natively understands a few relative forms, but not the wider
+        # vocabulary we accept - and resolving here keeps both tools
+        # consistent and lets bad input fail before any network/auth work.
+        try:
+            date_range = resolve_date_range(start_date, end_date)
+        except DateParseError as e:
+            return {"error": str(e)}
 
         # Mix of standard and e-commerce metrics to support all business types
         metric_names = [
@@ -69,7 +79,10 @@ class AnalyticsClient:
             property=f"properties/{property_id}",
             dimensions=[Dimension(name=d) for d in dimensions],
             metrics=[Metric(name=m) for m in metric_names],
-            date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
+            date_ranges=[DateRange(
+                start_date=date_range["start_date"],
+                end_date=date_range["end_date"],
+            )],
             limit=row_limit # Enforces strict response truncation at the API level
         )
 
@@ -88,6 +101,7 @@ class AnalyticsClient:
 
             return {
                 "property_id": property_id,
+                "date_range": date_range,
                 "rows_returned": len(parsed_rows),
                 "data": parsed_rows
             }

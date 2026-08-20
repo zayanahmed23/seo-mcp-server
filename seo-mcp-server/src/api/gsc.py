@@ -6,6 +6,7 @@ Provides async-compatible functions to fetch search analytics and indexing data.
 from typing import Dict, Any, List, Optional
 from googleapiclient.discovery import build
 from src.auth.google_oauth import get_google_credentials
+from src.dates import GSC_RETENTION_MONTHS, DateParseError, resolve_date_range
 
 class SearchConsoleClient:
     """Manages interactions with the Google Search Console API."""
@@ -42,20 +43,30 @@ class SearchConsoleClient:
         
         Args:
             site_url: The exact property URL (e.g., 'https://www.example.com/').
-            start_date: YYYY-MM-DD format.
-            end_date: YYYY-MM-DD format.
+            start_date: YYYY-MM-DD, or a relative form like '30daysAgo',
+                'lastMonth', '2026-03'. See src.dates for the full vocabulary.
+            end_date: Same accepted formats as start_date.
             dimensions: List of dimensions to group by (e.g., ['query', 'page', 'device']).
             row_limit: Maximum number of rows to return to protect LLM context limits.
-            
+
         Returns:
             A dictionary containing the parsed rows or error messages.
         """
         if dimensions is None:
             dimensions = ["query", "page"]
 
+        # The Search Console API accepts only strict YYYY-MM-DD, so relative
+        # tokens must be resolved before the request is built.
+        try:
+            date_range = resolve_date_range(
+                start_date, end_date, retention_months=GSC_RETENTION_MONTHS
+            )
+        except DateParseError as e:
+            return {"error": str(e)}
+
         request_body = {
-            "startDate": start_date,
-            "endDate": end_date,
+            "startDate": date_range["start_date"],
+            "endDate": date_range["end_date"],
             "dimensions": dimensions,
             "rowLimit": row_limit
         }
@@ -64,9 +75,10 @@ class SearchConsoleClient:
             response = self.service.searchanalytics().query(
                 siteUrl=site_url, body=request_body
             ).execute()
-            
+
             return {
                 "site": site_url,
+                "date_range": date_range,
                 "rows_returned": len(response.get("rows", [])),
                 "data": response.get("rows", [])
             }
