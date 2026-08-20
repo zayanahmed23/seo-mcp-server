@@ -60,12 +60,34 @@ def _candidates(filename: str, env_var: str) -> List[Path]:
 
 
 def _resolve_existing(filename: str, env_var: str) -> Path:
-    """First candidate that exists, else the preferred location."""
-    options = _candidates(filename, env_var)
-    for path in options:
+    """
+    Where to read/write this credential file.
+
+    An explicit environment override is authoritative and is returned whether
+    or not the file exists yet - token.json in particular never exists before
+    the first authorization, so falling through to a search would silently
+    write the token somewhere the user didn't ask for, and would mask a typo
+    in the variable rather than surfacing it.
+
+    Without an override, prefer an existing file (so a repo-local credential
+    still works for local development), else the app home default.
+    """
+    override = os.environ.get(env_var)
+    if override:
+        return Path(override).expanduser()
+
+    preferred = app_home() / filename
+
+    # SEO_MCP_HOME is also an explicit instruction: honour it exactly rather
+    # than letting a stray file in the repo win over the directory the user
+    # nominated.
+    if os.environ.get(HOME_ENV):
+        return preferred
+
+    for path in (preferred, PACKAGE_ROOT / filename):
         if path.exists():
             return path
-    return options[0]
+    return preferred
 
 
 class GoogleAuthManager:

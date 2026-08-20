@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seo-mcp-server"
+version = "0.1.0"
+description = "MCP server giving AI assistants read-only access to site crawls, Google Search Console, and GA4."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "AGPL-3.0-or-later"
+authors = [{ name = "Zayan Ahmed" }]
+keywords = ["mcp", "seo", "search-console", "google-analytics", "ga4", "crawler", "llm"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+]
+
+dependencies = [
+  # mcp 2.x restructured the package (removed mcp.server.fastmcp) and breaks
+  # this server's imports; pin to the 1.x line until migrated.
+  "mcp>=1.0.0,<2.0.0",
+  "pydantic>=2.0.0,<3.0.0",
+  "google-api-python-client>=2.100.0,<3.0.0",
+  "google-auth-httplib2>=0.2.0,<1.0.0",
+  "google-auth-oauthlib>=1.2.0,<2.0.0",
+  "google-analytics-data>=0.18.0,<1.0.0",
+  "playwright>=1.40.0,<2.0.0",
+  "beautifulsoup4>=4.12.0,<5.0.0",
+  "lxml>=5.0.0,<7.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+]
+
+[project.urls]
+Homepage = "https://github.com/zayanahmed23/seo-mcp-server"
+Issues = "https://github.com/zayanahmed23/seo-mcp-server/issues"
+
+[project.scripts]
+seo-mcp-server = "seo_mcp_server.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["seo_mcp_server*"]
+exclude = ["tests*", "crawl_output*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# Network-dependent tests are opt-in: `pytest -m network`
+markers = [
+  "network: test requires outbound internet access",
+]
+addopts = "-m 'not network'"

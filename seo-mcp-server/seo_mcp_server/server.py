@@ -9,9 +9,9 @@ from typing import List, Optional
 from mcp.server.fastmcp import FastMCP
 
 # Use the clean namespace imports defined in your __init__.py files
-from src.crawler import crawl_site
-from src.api import gsc_client, ga4_client
-from src.errors import redact_paths
+from seo_mcp_server.crawler import crawl_site
+from seo_mcp_server.api import gsc_client, ga4_client
+from seo_mcp_server.errors import redact_paths
 
 # stdout is reserved for the MCP stdio transport; route logs to stderr so
 # they never corrupt protocol framing (this is FastMCP/logging's default,

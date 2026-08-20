@@ -11,8 +11,8 @@ from google.analytics.data_v1beta.types import (
     Metric,
     RunReportRequest,
 )
-from src.auth.google_oauth import get_google_credentials
-from src.dates import DateParseError, resolve_date_range
+from seo_mcp_server.auth.google_oauth import get_google_credentials
+from seo_mcp_server.dates import DateParseError, resolve_date_range
 
 class AnalyticsClient:
     """Manages interactions with the Google Analytics 4 (GA4) Data API."""

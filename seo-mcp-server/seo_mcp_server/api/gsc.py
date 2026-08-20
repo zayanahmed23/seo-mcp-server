@@ -5,8 +5,8 @@ Provides async-compatible functions to fetch search analytics and indexing data.
 
 from typing import Dict, Any, List, Optional
 from googleapiclient.discovery import build
-from src.auth.google_oauth import get_google_credentials
-from src.dates import GSC_RETENTION_MONTHS, DateParseError, resolve_date_range
+from seo_mcp_server.auth.google_oauth import get_google_credentials
+from seo_mcp_server.dates import GSC_RETENTION_MONTHS, DateParseError, resolve_date_range
 
 class SearchConsoleClient:
     """Manages interactions with the Google Search Console API."""

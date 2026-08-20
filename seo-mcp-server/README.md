@@ -32,7 +32,7 @@ Read-only throughout. The OAuth scopes requested (`webmasters.readonly`,
 ```bash
 git clone https://github.com/zayanahmed23/seo-mcp-server.git
 cd seo-mcp-server/seo-mcp-server
-pip install -r requirements.txt
+pip install -e .
 python -m playwright install chromium
 ```
 
@@ -51,7 +51,7 @@ you'll run the server with.
 **3. Check your setup**
 
 ```bash
-python main.py --check
+seo-mcp-server --check      # or: python main.py --check
 ```
 
 This verifies every dependency, the browser, and your credentials — then prints
@@ -164,6 +164,21 @@ today, or a start date beyond Search Console's ~16-month retention.
   boundary — local filesystem paths are stripped, since responses may be
   relayed to a hosted model.
 - Found a vulnerability? See [SECURITY.md](../SECURITY.md).
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest                  # fast, offline
+pytest -m network       # also hit the network
+```
+
+The suite is hermetic — it never reads your real credentials, touches the
+network, or writes into the repo. Tests that need outbound access are marked
+`network` and deselected by default.
+
+Three equivalent ways to run the server: `seo-mcp-server`,
+`python -m seo_mcp_server`, or `python main.py` straight from a clone.
 
 ## Current limits
 
